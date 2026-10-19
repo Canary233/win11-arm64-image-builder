@@ -12,6 +12,7 @@ jobs:
     timeout-minutes: 360
 
     env:
+      GH_TOKEN: ${{ github.token }}
       INPUT_TAG: inputs-v1
       ISO_SHA256: A804037C4525611D9B398A3E0FC43F80659FEA1ED5B9559D51875E987B25B94E
       DVM_USERNAME: USER
@@ -100,13 +101,20 @@ jobs:
           $sevenZip = Get-Command 7z.exe -ErrorAction SilentlyContinue
           if (-not $sevenZip) { $sevenZip = Get-Command 7za.exe -ErrorAction Stop }
           $manifest = Join-Path $env:RUNNER_TEMP 'SHA256SUMS.txt'
-          foreach ($file in @($env:QCOW2, $env:VMPKG)) {
-            $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
-            "$hash  $([IO.Path]::GetFileName($file))" | Add-Content -LiteralPath $manifest -Encoding ascii
+          $hashes = @($env:QCOW2, $env:VMPKG) | ForEach-Object -Parallel {
+            [pscustomobject]@{
+              File = $_
+              Hash = (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash
+            }
+          } -ThrottleLimit 2
+          foreach ($item in $hashes) {
+            "$($item.Hash)  $([IO.Path]::GetFileName($item.File))" | Add-Content -LiteralPath $manifest -Encoding ascii
           }
 
           gh release create $env:BUILD_TAG --repo $env:GITHUB_REPOSITORY --title "Windows 11 ARM64 Chinese Pro $env:GITHUB_RUN_NUMBER" --notes "Automated native ARM64 build. Split archives use 1.9 GiB volumes; extract the .7z.001 volume after downloading every part."
+          if ($LASTEXITCODE -ne 0) { throw "release creation failed" }
           gh release upload $env:BUILD_TAG $manifest (Join-Path $env:RUNNER_TEMP 'build.log') --repo $env:GITHUB_REPOSITORY --clobber
+          if ($LASTEXITCODE -ne 0) { throw "manifest upload failed" }
 
           foreach ($file in @($env:QCOW2, $env:VMPKG)) {
             $archive = "$file.7z"
