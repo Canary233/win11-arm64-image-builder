@@ -27,6 +27,7 @@ $env:OPENSSH_SRC   = "https://github.com/PowerShell/Win32-OpenSSH/releases/downl
 
 $env:DVM_USERNAME      = "USER"
 $env:DVM_PASSWORD      = "DroidVM"
+# $env:DVM_LOCALE      = "zh-CN"   # Chinese ARM64 Pro image
 $env:SSH_PUBKEY        = "ssh-ed25519 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA root@ReplaceMe"
 
 $env:DISK_SIZE_MB      = "40960" # 40GB

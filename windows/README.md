@@ -27,6 +27,8 @@ powershell -ExecutionPolicy Bypass -File windows_build.ps1   # 會自動提權
 ```
 變數清單見根目錄 README。**Windows 專屬注意**:帳號名用 `$env:DVM_USERNAME`(**不是** Windows 內建的 `$env:USERNAME`＝目前登入者);密碼 `$env:DVM_PASSWORD`(空密碼會擋 RDP/SSH;相容舊 `$env:SSH_PASSWORD`)。
 
+中文版映像請設 `$env:DVM_LOCALE='zh-CN'`，builder 會把 unattend 的 UI/system/input locale 一併設成簡體中文；預設仍為 `en-US`。
+
 ## 流程(build.ps1,全程離線不開機)
 1. 解析驅動來源 → 掛 ISO 取 `install.wim`
 2. 建 + 掛 VHDX,GPT 分割 ESP(FAT32)+ MSR + Windows(NTFS)

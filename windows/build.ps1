@@ -249,6 +249,8 @@ $VMPKG_COMPRESSION = if ($env:VMPKG_COMPRESSION) { $env:VMPKG_COMPRESSION } else
 $VMPKG_THREADS = if ($env:VMPKG_THREADS) { [int]$env:VMPKG_THREADS } else { 0 }               # zstd threads, 0 = all
 $COMPRESS    = if ($env:COMPRESS -and $env:COMPRESS -notmatch '^(0|false|no|off)$') { $env:COMPRESS } else { "" }   # 1 = zstd-compress the qcow2 clusters (step 9); 0/false/no/off/unset = off
 $QEMU_IMG_INSTALL = if ($env:QEMU_IMG_INSTALL -and $env:QEMU_IMG_INSTALL -notmatch '^(0|false|no|off)$') { $env:QEMU_IMG_INSTALL } else { "" }   # 1 = winget-install QEMU without asking when qemu-img is missing
+# Optional: use a newer x64 DISM (for example from a matching-version WinPE) when servicing a newer ARM64 image.
+$DISM_EXE = if ($env:DISM_EXE) { $env:DISM_EXE } else { "dism" }
 $LETTER_ESP  = if ($env:LETTER_ESP)  { $env:LETTER_ESP }       else { Get-FreeDriveLetter }
 $LETTER_WIN  = if ($env:LETTER_WIN)  { $env:LETTER_WIN }       else { Get-FreeDriveLetter @($LETTER_ESP) }
 # Driver install list/cert (mirrors macOS): DRIVER_DIR=directory containing the per-driver subfolders (ZIP/ = driver zip extraction root);
@@ -277,11 +279,13 @@ $USERNAME     = if ($env:DVM_USERNAME) { $env:DVM_USERNAME } else { "USER" }
 $PASSWORD     = if ($env:DVM_PASSWORD) { $env:DVM_PASSWORD } elseif ($env:SSH_PASSWORD) { $env:SSH_PASSWORD } else { "DroidVM" }
 # SSH public key(s) (multiple allowed, newline-separated); empty = password login only. Passed via environment variable, not written to inputs\.
 $SSH_PUBKEY   = if ($env:SSH_PUBKEY)   { $env:SSH_PUBKEY }      else { "" }
+# OOBE locale (BCP-47), e.g. en-US or zh-CN. InputLocale is derived from the common Windows locale table.
+$LOCALE       = if ($env:DVM_LOCALE)   { $env:DVM_LOCALE }      else { "en-US" }
 # OpenSSH installer source: URL (downloaded at build time) or local path (copied). Defaults to the arm64 .msi. Empty string = do not install SSH (RDP only).
 $OPENSSH_SRC  = if ($env:OPENSSH_SRC)  { $env:OPENSSH_SRC }     else { "https://github.com/PowerShell/Win32-OpenSSH/releases/download/10.0.0.0p2-Preview/OpenSSH-ARM64-v10.0.0.0.msi" }
 Write-Host "[disk] drive letters: ESP=$LETTER_ESP Windows=$LETTER_WIN"
 
-foreach ($t in @("dism", "bcdboot", "diskpart")) {
+foreach ($t in @($DISM_EXE, "bcdboot", "diskpart")) {
     if (-not (Get-Command $t -ErrorAction SilentlyContinue)) { throw "$t not found" }
 }
 Ensure-QemuImg $QEMU_IMG_INSTALL
@@ -365,7 +369,16 @@ exit
 
     # === 4) Apply image ===
     Write-Host "[dism] applying install.wim -> $W\ ..."
-    Invoke-ExternalCommand -FilePath "dism" -ArgumentList @("/Apply-Image", "/ImageFile:$wim", "/Index:$IMAGE_INDEX", "/ApplyDir:$W\") -OutNull -What "dism /Apply-Image"
+    Invoke-ExternalCommand -FilePath $DISM_EXE -ArgumentList @("/Apply-Image", "/ImageFile:$wim", "/Index:$IMAGE_INDEX", "/ApplyDir:$W\") -OutNull -What "dism /Apply-Image"
+
+    # The WIM has been fully applied; release the ISO before the long servicing phase when requested.
+    if ($env:DVM_DELETE_SRC_ISO_AFTER_APPLY -match '^(1|true|yes|on)$') {
+        Show-CommandLine "Dismount-DiskImage" @("-ImagePath", $SRC_ISO)
+        Dismount-DiskImage -ImagePath $SRC_ISO | Out-Null
+        $isoMounted = $false
+        Remove-Item -LiteralPath $SRC_ISO -Force
+        Write-Host "[iso] released and removed source ISO after apply" -ForegroundColor DarkYellow
+    }
 
     # === 5) Offline driver injection (no signature prompt) ===
     # Offline-inject only the driver subfolders listed in DRIVER_INSTALL (empty=the whole $drvDir /Recurse). /ForceUnsigned skips the signature prompt.
@@ -375,12 +388,12 @@ exit
             $sub = Join-Path $drvDir $d
             if (Test-Path $sub -PathType Container) {
                 Write-Host "[dism] inject driver: $d"
-                Invoke-ExternalCommand -FilePath "dism" -ArgumentList @("/Image:$W\", "/Add-Driver", "/Driver:$sub", "/Recurse", "/ForceUnsigned") -OutNull -What "dism /Add-Driver $d"
+                Invoke-ExternalCommand -FilePath $DISM_EXE -ArgumentList @("/Image:$W\", "/Add-Driver", "/Driver:$sub", "/Recurse", "/ForceUnsigned") -OutNull -What "dism /Add-Driver $d"
             } else { Write-Host "  [warn] driver $d to install does not exist in $drvDir" -ForegroundColor DarkYellow }
         }
     } else {
         Write-Host "[dism] injecting all drivers offline ..."
-        Invoke-ExternalCommand -FilePath "dism" -ArgumentList @("/Image:$W\", "/Add-Driver", "/Driver:$drvDir", "/Recurse", "/ForceUnsigned") -OutNull -What "dism /Add-Driver"
+        Invoke-ExternalCommand -FilePath $DISM_EXE -ArgumentList @("/Image:$W\", "/Add-Driver", "/Driver:$drvDir", "/Recurse", "/ForceUnsigned") -OutNull -What "dism /Add-Driver"
     }
 
     # === 5b) Extract driver signer certs (offline) -> stage for first-boot trust ===
@@ -429,7 +442,7 @@ exit
             $fodSrc = Resolve-InputFile $EMS_SAC_SOURCE
             Write-Host "[ems-sac] injecting FoD offline from $fodSrc ..."
             try {
-                Invoke-ExternalCommand -FilePath "dism" -ArgumentList @("/Image:$W\", "/Add-Capability", "/CapabilityName:$EMS_SAC_CAP", "/Source:$fodSrc", "/LimitAccess") -OutNull -What "dism /Add-Capability EMS-SAC"
+                Invoke-ExternalCommand -FilePath $DISM_EXE -ArgumentList @("/Image:$W\", "/Add-Capability", "/CapabilityName:$EMS_SAC_CAP", "/Source:$fodSrc", "/LimitAccess") -OutNull -What "dism /Add-Capability EMS-SAC"
                 Write-Host "[ems-sac] FoD injected offline (SAC runtime present in image)" -ForegroundColor Green
             } catch {
                 Write-Host "  [warn] offline FoD injection failed: $($_.Exception.Message)" -ForegroundColor DarkYellow
@@ -442,11 +455,26 @@ exit
     Write-Host "[debloat] removing extra provisioned Appx offline ..."
     $keep = 'VCLibs|NET\.Native|UI\.Xaml|Store|SecHealth|Photos|Notepad|Terminal|WindowsTerminal'
     try {
-        Get-AppxProvisionedPackage -Path "$W\" | Where-Object { $_.DisplayName -notmatch $keep } | ForEach-Object {
-            try {
-                Show-CommandLine "Remove-AppxProvisionedPackage" @("-Path", "$W\", "-PackageName", $_.PackageName)
-                Remove-AppxProvisionedPackage -Path "$W\" -PackageName $_.PackageName | Out-Null
-            } catch {}
+        # Use the same DISM binary as the rest of the offline servicing. Host PowerShell's
+        # Get-/Remove-AppxProvisionedPackage bind to the host DISM API and can reject a newer image.
+        Show-CommandLine $DISM_EXE @("/English", "/Image:$W\", "/Get-ProvisionedAppxPackages")
+        $pkgOut = & $DISM_EXE /English "/Image:$W\" /Get-ProvisionedAppxPackages 2>&1
+        Assert-Exit "dism /Get-ProvisionedAppxPackages"
+        $pkgName = $null; $pkgDisplay = $null
+        foreach ($line in $pkgOut) {
+            $text = [string]$line
+            if ($text -match '^\s*PackageName\s*:\s*(.+)$') { $pkgName = $Matches[1].Trim(); continue }
+            if ($text -match '^\s*DisplayName\s*:\s*(.+)$') { $pkgDisplay = $Matches[1].Trim(); continue }
+            if ($pkgName -and $pkgDisplay) {
+                if ($pkgDisplay -notmatch $keep) {
+                    try {
+                        Show-CommandLine $DISM_EXE @("/English", "/Image:$W\", "/Remove-ProvisionedAppxPackage", "/PackageName:$pkgName")
+                        & $DISM_EXE /English "/Image:$W\" /Remove-ProvisionedAppxPackage "/PackageName:$pkgName" | Out-Null
+                        Assert-Exit "dism /Remove-ProvisionedAppxPackage $pkgName"
+                    } catch { Write-Host "  (skip Appx $pkgDisplay): $($_.Exception.Message)" -ForegroundColor DarkYellow }
+                }
+                $pkgName = $null; $pkgDisplay = $null
+            }
         }
     } catch { Write-Host "  (skipping debloat: $($_.Exception.Message))" -ForegroundColor DarkYellow }
 
@@ -455,7 +483,7 @@ exit
     # Purely to shrink the image; failure does not affect usability, so everything is set as non-fatal.
     Write-Host "[debloat] WinSxS component cleanup (ResetBase, offline) ..."
     try {
-        Invoke-ExternalCommand -FilePath "dism" -ArgumentList @("/Image:$W\", "/Cleanup-Image", "/StartComponentCleanup", "/ResetBase") -OutNull -What "dism /Cleanup-Image /ResetBase"
+        Invoke-ExternalCommand -FilePath $DISM_EXE -ArgumentList @("/Image:$W\", "/Cleanup-Image", "/StartComponentCleanup", "/ResetBase") -OutNull -What "dism /Cleanup-Image /ResetBase"
     } catch {
         Write-Host "  (skipping ResetBase: $($_.Exception.Message))" -ForegroundColor DarkYellow
     }
@@ -542,7 +570,8 @@ exit
     # Inject account/password (@@USERNAME@@ / @@PASSWORD@@ tokens). XML-escape keeps the XML valid when the credentials contain &<>"
     # (mirrors the macOS perl version). Write UTF-8 without BOM via .NET, matching the original file.
     $esc = { param($s) $s.Replace('&','&amp;').Replace('<','&lt;').Replace('>','&gt;').Replace('"','&quot;') }
-    $unattendXml = (Get-Content $unattendSrc -Raw).Replace('@@USERNAME@@', (& $esc $USERNAME)).Replace('@@PASSWORD@@', (& $esc $PASSWORD))
+    $inputLocale = switch ($LOCALE) { 'zh-CN' { '0804:00000804' } 'zh-TW' { '0404:00000404' } 'ja-JP' { '0411:00000411' } 'ko-KR' { '0412:00000412' } default { '0409:00000409' } }
+    $unattendXml = (Get-Content $unattendSrc -Raw).Replace('@@USERNAME@@', (& $esc $USERNAME)).Replace('@@PASSWORD@@', (& $esc $PASSWORD)).Replace('@@LOCALE@@', (& $esc $LOCALE)).Replace('@@INPUTLOCALE@@', (& $esc $inputLocale))
     Show-CommandLine "Set-Content" @("$W\Windows\Panther\unattend.xml", "(unattend.xml + password)")
     [System.IO.File]::WriteAllText("$W\Windows\Panther\unattend.xml", $unattendXml, (New-Object System.Text.UTF8Encoding($false)))
     Write-Host "[oobe] unattend.xml placed (first boot creates USER, autologon, imports certs)"
@@ -617,6 +646,8 @@ exit
     if ($COMPRESS) { $convArgs += @("-c", "-o", "compression_type=zstd") }
     $convArgs += @("-O", "qcow2", $VHDX, $OUT_QCOW)
     Invoke-ExternalCommand -FilePath "qemu-img" -ArgumentList $convArgs -What "qemu-img convert"
+    Remove-Item -LiteralPath $VHDX -Force
+    Write-Host "[disk] removed intermediate VHDX after qcow2 conversion"
     $sz = "{0:N1} GB" -f ((Get-Item $OUT_QCOW).Length / 1GB)
     Write-Host "Done  -> $OUT_QCOW ($sz)" -ForegroundColor Green
 

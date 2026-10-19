@@ -1,0 +1,131 @@
+name: Build Windows 11 ARM64 Chinese Pro
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-11-arm
+    timeout-minutes: 360
+
+    env:
+      INPUT_TAG: inputs-v1
+      ISO_SHA256: A804037C4525611D9B398A3E0FC43F80659FEA1ED5B9559D51875E987B25B94E
+      DVM_USERNAME: USER
+      DVM_PASSWORD: DroidVM
+      DVM_LOCALE: zh-CN
+      IMAGE_INDEX: '1'
+      DISK_SIZE_MB: '65536'
+      DRIVERS_DIR: https://github.com/Droid-VM/gunyah-guest-drivers-windows/releases/download/dev/gunyah-arm64-drivers.zip
+      DRIVER_DIR: ZIP/drivers
+      DRIVER_INSTALL: NetKVM rdmapool pvmpower vioinput viostor vioscsi viosnd viofs
+      DRIVER_CERT: ZIP/DroidVM_Test.cer
+      EMS_SAC_SOURCE: skip
+      OPENSSH_SRC: https://github.com/PowerShell/Win32-OpenSSH/releases/download/10.0.0.0p2-Preview/OpenSSH-ARM64-v10.0.0.0.msi
+      VMPKG_COMPRESSION: auto
+      QEMU_IMG_INSTALL: '0'
+      DVM_DELETE_SRC_ISO_AFTER_APPLY: '1'
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install QEMU tools
+        shell: pwsh
+        run: |
+          Get-PSDrive -PSProvider FileSystem | Select-Object Name,@{N='FreeGB';E={[math]::Round($_.Free/1GB,1)}} | Format-Table | Out-String | Write-Host
+          choco install qemu 7zip.install -y --no-progress
+          $qemu = Join-Path $env:ProgramFiles 'qemu'
+          if (-not (Test-Path (Join-Path $qemu 'qemu-img.exe'))) {
+            throw "qemu-img.exe was not installed under $qemu"
+          }
+          $qemu | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Assemble official Chinese Pro ISO
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:INPUT_TAG"
+          $parts = @(0..4 | ForEach-Object { 'Win11_26H2_Arm64_Pro_zh-cn-v2.iso.part{0:D2}' -f $_ })
+          $iso = Join-Path $env:RUNNER_TEMP 'Win11_26H2_Arm64_Pro_zh-cn-v2.iso'
+          $stream = [IO.File]::Open($iso, [IO.FileMode]::Create, [IO.FileAccess]::Write)
+          try {
+            foreach ($part in $parts) {
+              $file = Join-Path $env:RUNNER_TEMP $part
+              Invoke-WebRequest -UseBasicParsing -Uri "$base/$part" -OutFile $file
+              $input = [IO.File]::OpenRead($file)
+              try { $input.CopyTo($stream) } finally { $input.Dispose() }
+              Remove-Item -LiteralPath $file -Force
+            }
+          } finally {
+            $stream.Dispose()
+          }
+
+          $hash = (Get-FileHash -LiteralPath $iso -Algorithm SHA256).Hash
+          if ($hash -ne $env:ISO_SHA256) {
+            throw "ISO SHA256 mismatch: $hash"
+          }
+          "SRC_ISO=$iso" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BUILD_TAG=win11-image-$env:GITHUB_RUN_ID" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build image and package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP 'out'
+          New-Item -ItemType Directory -Path $out -Force | Out-Null
+          $env:OUT_QCOW = Join-Path $out 'Win11_26H2_Arm64_Pro_zh-cn.qcow2'
+          $env:OUT_VMPKG = Join-Path $out 'Win11_26H2_Arm64_Pro_zh-cn.vmpkg'
+          $env:VMS_JSON = Join-Path $env:GITHUB_WORKSPACE 'vms.json'
+
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $env:GITHUB_WORKSPACE 'windows\build.ps1') 2>&1 | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'build.log')
+          if ($LASTEXITCODE -ne 0) {
+            throw "build.ps1 failed with exit code $LASTEXITCODE"
+          }
+          if (-not (Test-Path -LiteralPath $env:OUT_QCOW)) { throw 'qcow2 output is missing' }
+          if (-not (Test-Path -LiteralPath $env:OUT_VMPKG)) { throw 'vmpkg output is missing' }
+
+          Get-ChildItem -LiteralPath $env:TEMP -Directory -Filter 'droidvm-*' -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath $env:SRC_ISO -Force -ErrorAction SilentlyContinue
+          "QCOW2=$($env:OUT_QCOW)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "VMPKG=$($env:OUT_VMPKG)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Verify and publish outputs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sevenZip = Get-Command 7z.exe -ErrorAction SilentlyContinue
+          if (-not $sevenZip) { $sevenZip = Get-Command 7za.exe -ErrorAction Stop }
+          $manifest = Join-Path $env:RUNNER_TEMP 'SHA256SUMS.txt'
+          foreach ($file in @($env:QCOW2, $env:VMPKG)) {
+            $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+            "$hash  $([IO.Path]::GetFileName($file))" | Add-Content -LiteralPath $manifest -Encoding ascii
+          }
+
+          gh release create $env:BUILD_TAG --repo $env:GITHUB_REPOSITORY --title "Windows 11 ARM64 Chinese Pro $env:GITHUB_RUN_NUMBER" --notes "Automated native ARM64 build. Split archives use 1.9 GiB volumes; extract the .7z.001 volume after downloading every part."
+          gh release upload $env:BUILD_TAG $manifest (Join-Path $env:RUNNER_TEMP 'build.log') --repo $env:GITHUB_REPOSITORY --clobber
+
+          foreach ($file in @($env:QCOW2, $env:VMPKG)) {
+            $archive = "$file.7z"
+            & $sevenZip.Source a -t7z -mx=1 -mmt=on -v1900m $archive $file | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "7-Zip failed for $file" }
+            $volumes = Get-ChildItem -LiteralPath (Split-Path $file -Parent) -Filter "$([IO.Path]::GetFileName($archive)).*" -File | Sort-Object Name
+            foreach ($volume in $volumes) {
+              gh release upload $env:BUILD_TAG $volume.FullName --repo $env:GITHUB_REPOSITORY --clobber
+              if ($LASTEXITCODE -ne 0) { throw "release upload failed: $($volume.Name)" }
+              Remove-Item -LiteralPath $volume.FullName -Force
+            }
+            Remove-Item -LiteralPath $file -Force
+          }
+
+      - name: Upload failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-failure-logs
+          path: |
+            ${{ runner.temp }}/build.log
+          if-no-files-found: ignore

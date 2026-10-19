@@ -8,6 +8,11 @@
 #>
 $ErrorActionPreference = 'Stop'
 
+# Runtime settings that cannot be reliably serviced on the x64 build host.
+& reg.exe add 'HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server' /v fDenyTSConnections /t REG_DWORD /d 0 /f | Out-Null
+& reg.exe add 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\ReserveManager' /v ShippedWithReserves /t REG_DWORD /d 0 /f | Out-Null
+& powercfg.exe /hibernate off 2>$null | Out-Null
+
 $msi = Get-ChildItem 'C:\DroidVM' -Filter '*.msi' -ErrorAction SilentlyContinue | Select-Object -First 1
 $zip = Get-ChildItem 'C:\DroidVM' -Filter '*.zip' -ErrorAction SilentlyContinue | Select-Object -First 1
 $sshInstalled = $false

@@ -40,6 +40,7 @@ bash macos_build.sh
 | `DRIVER_CERT` | 簽章憑證(空 = 從驅動 `.cat` 自動萃取) |
 | `IMAGE_INDEX` | install.wim 版本索引(空 = 列出讓你選) |
 | `USERNAME` / `PASSWORD` | 建立的本機管理員帳號。macOS 用 `USERNAME` / `PASSWORD`;Windows 用 `$env:DVM_USERNAME` / `$env:DVM_PASSWORD` |
+| `DVM_LOCALE` | Windows 路線的 OOBE 語系（BCP-47，預設 `en-US`；中文專業版用 `zh-CN`） |
 | `SSH_PUBKEY` | SSH 公鑰(空 = 只密碼登入) |
 | `OUT_QCOW` | 輸出 qcow2 路徑 |
 | `EMS_SAC_SOURCE` | 互動式 `SAC>` 執行期 FoD 從哪來:**`skip`**(預設,只出 boot-EMS)/ **`online`**(路線 A 於**目標端首次開機**連網裝;路線 B 於**構建期** qemu VM 內連網裝並烙入,目標端免連網)/ **`E:\`**(ARM64 FoD ISO 掛載點/資料夾,**僅路線 A**,離線 `dism /Add-Capability` 烙進映像、全程零連網)。見下方 EMS/SAC |
