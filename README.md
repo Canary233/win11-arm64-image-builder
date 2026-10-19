@@ -28,6 +28,16 @@ powershell -ExecutionPolicy Bypass -File windows_build.ps1
 bash macos_build.sh
 ```
 
+### GitHub Actions 原生 ARM64 構建
+
+`.github/workflows/build-arm64-image.yml` 會在 GitHub 官方的 `windows-11-arm` runner 上直接執行 ARM64 DISM、驅動注入、bcdboot 與 qcow2/vmpkg 打包，不啟動 QEMU 跑完整 OOBE，因此比軟體模擬快得多。
+
+1. 把官方 ISO 切成小於 2 GiB 的分卷，上傳到 `inputs-v1` Release。
+2. 在 Actions 頁面手動執行 **Build Windows 11 ARM64 Chinese Pro**。
+3. 工作流驗證 ISO SHA256，建立 `Win11_26H2_Arm64_Pro_zh-cn.qcow2` 與 `.vmpkg`，再輸出 SHA256 清單及 1.9 GiB 的 `.7z.001` 分卷 Release。
+
+下載全部分卷後，從 `.7z.001` 解壓即可。工作流使用內建的 `GITHUB_TOKEN` 上傳 Release，不需要另外保存 PAT。
+
 ## 設定(入口腳本裡的變數)
 
 檔案類變數(`SRC_ISO` / `DRIVERS_DIR` / `OPENSSH_SRC`)可填 **URL**(自動下載到 `files/`)或**本地路徑**;zip 自動解壓。
